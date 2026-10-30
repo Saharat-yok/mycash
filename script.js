@@ -9,7 +9,11 @@
     const d = new Date(iso+'T00:00:00');
     return d.toLocaleDateString('th-TH', {day:'2-digit', month:'short', year:'2-digit'});
   };
-  const todayIso = () => new Date().toISOString().slice(0,10);
+  // ใช้วันที่ตามเวลาเครื่อง (toISOString เป็น UTC ทำให้ช่วงเช้ามืดในไทยได้วันที่เมื่อวาน)
+  const todayIso = () => {
+    const d = new Date();
+    return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+  };
   const monthLabel = key => {
     const [y,m] = key.split('-');
     return MONTH_NAMES[parseInt(m,10)-1] + ' ' + y;
@@ -20,17 +24,42 @@
   let chartInstance = null;
 
   // ---------- persistence ----------
+  // ตรวจและทำความสะอาดข้อมูลจาก localStorage / ไฟล์นำเข้า ก่อนนำไปใช้
+  const MONTH_KEY_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
+  const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+  function sanitizeSettings(s){
+    s = (s && typeof s === 'object') ? s : {};
+    const percent = parseFloat(s.percent);
+    return {
+      name: typeof s.name === 'string' ? s.name : '',
+      percent: (isFinite(percent) && percent > 0) ? percent : 10
+    };
+  }
+  function sanitizeMonths(src){
+    const months = {};
+    if(!src || typeof src !== 'object' || Array.isArray(src)) return months;
+    Object.keys(src).forEach(key=>{
+      const m = src[key];
+      if(!MONTH_KEY_RE.test(key) || !m || typeof m !== 'object') return;
+      const salary = (m.salary === null || m.salary === '') ? NaN : Number(m.salary);
+      const records = (Array.isArray(m.records) ? m.records : [])
+        .filter(r => r && typeof r === 'object' && isFinite(Number(r.amount)) && Number(r.amount) > 0)
+        .map(r => ({
+          date: (typeof r.date === 'string' && DATE_RE.test(r.date)) ? r.date : key + '-01',
+          amount: Number(r.amount)
+        }));
+      months[key] = { salary: (isFinite(salary) && salary >= 0) ? salary : null, records };
+    });
+    return months;
+  }
   function load(){
     try{
       const raw = localStorage.getItem(LS_KEY);
       if(raw){
         const parsed = JSON.parse(raw);
         if(parsed && typeof parsed === 'object'){
-          state.settings = Object.assign({name:'', percent:10}, parsed.settings || {});
-          state.months = parsed.months || {};
-          Object.keys(state.months).forEach(k=>{
-            if(!Array.isArray(state.months[k].records)) state.months[k].records = [];
-          });
+          state.settings = sanitizeSettings(parsed.settings);
+          state.months = sanitizeMonths(parsed.months);
         }
       }
     }catch(e){ console.error('โหลดข้อมูลไม่สำเร็จ', e); }
@@ -129,7 +158,6 @@
   function renderSettings(){
     document.getElementById('goalName').value = state.settings.name || '';
     document.getElementById('goalPercent').value = state.settings.percent;
-    document.getElementById('pctLabel').textContent = state.settings.percent;
     document.getElementById('coverTitle').textContent = state.settings.name || 'สมุดบัญชีออมทรัพย์';
     const keys = activeMonthKeys();
     document.getElementById('bookNumber').textContent = keys.length
@@ -432,12 +460,14 @@
   });
 
   function applyImportedState(newSettings, newMonths){
+    const months = sanitizeMonths(newMonths);
+    if(Object.keys(months).length === 0){
+      alert('ไม่พบข้อมูลรายเดือนที่ถูกต้องในไฟล์นี้ ข้อมูลปัจจุบันไม่ถูกเปลี่ยนแปลง');
+      return;
+    }
     if(confirm('นำเข้าไฟล์นี้จะแทนที่ข้อมูลปัจจุบันทั้งหมด ยืนยันหรือไม่?')){
-      state.settings = Object.assign({name:'', percent:10}, newSettings || {});
-      state.months = newMonths || {};
-      Object.keys(state.months).forEach(k=>{
-        if(!Array.isArray(state.months[k].records)) state.months[k].records = [];
-      });
+      state.settings = sanitizeSettings(newSettings);
+      state.months = months;
       save();
       const sel = document.getElementById('monthSelect').value;
       populateDropdowns(sel);
@@ -557,7 +587,8 @@
     reader.onload = (e)=>{
       try{
         const data = new Uint8Array(e.target.result);
-        const wb = XLSX.read(data, { type:'array' });
+        // raw:true กันไม่ให้ CSV แปลง "2026-01" เป็นเลขวันที่ของ Excel
+        const wb = XLSX.read(data, { type:'array', raw:true });
         const ws = wb.Sheets[wb.SheetNames[0]];
         const aoa = XLSX.utils.sheet_to_json(ws, { header:1, defval:'', raw:true });
         const { settings, months } = parseSheetAOA(aoa);
